@@ -1,5 +1,7 @@
+import { deduplicate } from "./correlate";
 import type {
   Alert,
+  CorrelationConfig,
   EvaluationResult,
   GroundTruthIncident,
   Incident,
@@ -90,6 +92,8 @@ function scopeTruths(
 export interface EvaluateInput {
   alerts: Alert[];
   groundTruth: GroundTruthIncident[];
+  /** Correlation settings — the baseline deduplicates with the same rule. */
+  config: CorrelationConfig;
   /** Incidents produced by the correlation engine. */
   proposed: Incident[];
   /** Measured execution time of the correlation pass, in ms. */
@@ -103,36 +107,57 @@ export interface EvaluateInput {
  * Compares two detectors on the same synthetic dataset:
  *  - baseline: every unique (de-duplicated) alert is its own incident
  *  - proposed: the correlation engine's grouping
- * Both are scored against ground truth with the same overlap rule.
+ * Both are scored against ground truth with the same overlap rule, and both
+ * groups include the suppressed duplicates that belong to them, so duplicate
+ * suppression is attributed rather than penalised.
  */
 export function evaluate(input: EvaluateInput): EvaluationResult {
   const { alerts, groundTruth, proposed } = input;
   const scopedIds = new Set(alerts.map((a) => a.id));
   const truths = scopeTruths(groundTruth, scopedIds);
 
-  // Baseline: one incident per unique alert (duplicates already collapsed).
-  const seenFingerprint = new Set<string>();
-  const baselineIncidents: Array<{ id: string; alertIds: string[] }> = [];
-  const alertById = new Map(alerts.map((a) => [a.id, a]));
-  const uniqueAlerts = [...alerts].sort((a, b) => a.ts - b.ts).filter((a) => {
-    const fp = a.fingerprint;
-    if (seenFingerprint.has(fp)) return false;
-    seenFingerprint.add(fp);
-    return true;
-  });
-  for (const a of uniqueAlerts) {
-    baselineIncidents.push({ id: `BASE-${a.id}`, alertIds: [a.id] });
+  // Baseline: one incident per unique alert, duplicates attributed to the
+  // fingerprint they were suppressed from — same dedup rule as the engine.
+  const { unique, duplicates } = deduplicate(alerts, input.config);
+  const dupByCanonical = new Map<string, string[]>();
+  for (const d of duplicates) {
+    const list = dupByCanonical.get(d.duplicateOf) ?? [];
+    list.push(d.alert.id);
+    dupByCanonical.set(d.duplicateOf, list);
   }
+  const uniqueAlerts = unique;
+  const baselineIncidents: Array<{ id: string; alertIds: string[] }> = unique.map((u) => ({
+    id: `BASE-${u.id}`,
+    alertIds: [u.id, ...(dupByCanonical.get(u.id) ?? [])],
+  }));
+  const alertById = new Map(alerts.map((a) => [a.id, a]));
 
-  const proposedIncidents = proposed.map((p) => ({ id: p.id, alertIds: p.alertIds }));
+  // Predictions claim their suppressed duplicates too, so a group is scored
+  // on every alert it accounts for.
+  const proposedIncidents = proposed.map((p) => ({
+    id: p.id,
+    alertIds: [...p.alertIds, ...p.duplicateIds],
+  }));
   const baselineOutcome = match(baselineIncidents, truths);
   const proposedOutcome = match(proposedIncidents, truths);
 
-  // Root-cause top-1 accuracy on matched incidents only.
+  // Root-cause top-1 accuracy, scored separately on each detector's own
+  // matched groups: the baseline can only name the service of its fragment's
+  // canonical alert, the engine names its ranked probable root cause.
   let baselineRootCorrect = 0;
+  let baselineRootTotal = 0;
   let proposedRootCorrect = 0;
-  let rootTotal = 0;
+  let proposedRootTotal = 0;
   const matchDetail: MatchDetail[] = [];
+
+  for (const m of baselineOutcome.matched) {
+    const truth = truths.find((t) => t.id === m.truth);
+    const group = baselineIncidents.find((p) => p.id === m.predicted);
+    const first = group ? alertById.get(group.alertIds[0]) : undefined;
+    if (!truth || !first) continue;
+    baselineRootTotal += 1;
+    if (first.service === truth.rootCause) baselineRootCorrect += 1;
+  }
 
   for (const t of truths) {
     const predictedPair = proposedOutcome.matched.find((m) => m.truth === t.id);
@@ -142,14 +167,9 @@ export function evaluate(input: EvaluateInput): EvaluationResult {
     const overlap = predictedPair?.overlap ?? 0;
     let rootCorrect: boolean | null = null;
     if (predictedIncident) {
-      rootTotal += 1;
+      proposedRootTotal += 1;
       rootCorrect = predictedIncident.probableRootCause === t.rootCause;
       if (rootCorrect) proposedRootCorrect += 1;
-      // The baseline has no ranking model: its "root cause" is the single
-      // alert's own service, correct only when ground truth is that service.
-      const onlyAlert = alertById.get(predictedIncident.alertIds[0]);
-      const baselineCorrect = onlyAlert ? onlyAlert.service === t.rootCause : false;
-      if (baselineCorrect) baselineRootCorrect += 1;
     }
     matchDetail.push({
       groundTruthId: t.id,
@@ -252,8 +272,8 @@ export function evaluate(input: EvaluateInput): EvaluationResult {
     {
       label: "Root-cause top-1 accuracy",
       definition: "Top-ranked candidate equals the labelled root cause",
-      baseline: rootTotal ? baselineRootCorrect / rootTotal : 0,
-      proposed: rootTotal ? proposedRootCorrect / rootTotal : 0,
+      baseline: baselineRootTotal ? baselineRootCorrect / baselineRootTotal : 0,
+      proposed: proposedRootTotal ? proposedRootCorrect / proposedRootTotal : 0,
       higherIsBetter: true,
       format: "percent",
     },
@@ -277,12 +297,12 @@ export function evaluate(input: EvaluateInput): EvaluationResult {
     alertReductionRate: 1 - proposedCount / (uniqueAlerts.length || 1),
     baseline: baselineMetrics,
     proposed: proposedMetrics,
-    baselineRootTop1: rootTotal ? baselineRootCorrect / rootTotal : 0,
-    proposedRootTop1: rootTotal ? proposedRootCorrect / rootTotal : 0,
+    baselineRootTop1: baselineRootTotal ? baselineRootCorrect / baselineRootTotal : 0,
+    proposedRootTop1: proposedRootTotal ? proposedRootCorrect / proposedRootTotal : 0,
     baselineMs: input.baselineMs ?? 0,
     proposedMs: input.proposedMs,
     rows,
-    matching: `Predicted and ground-truth alert sets are compared with Jaccard overlap |A ∩ B| / |A ∪ B|. Pairs are matched greedily from highest to lowest overlap and count as a match at ≥ ${MATCH_THRESHOLD}. Unmatched predictions are false positives; unmatched ground truths are false negatives. Root-cause accuracy is only scored on matched incidents.`,
+    matching: `Each detector's alert groups — including the duplicates it suppressed — are compared with ground-truth groups using Jaccard overlap |A ∩ B| / |A ∪ B|. Pairs are matched greedily from highest to lowest overlap and count as a match at ≥ ${MATCH_THRESHOLD}. Unmatched predictions are false positives; unmatched ground truths are false negatives. Root-cause accuracy is scored only on each detector's own matched groups.`,
     matchDetail: matchDetail.sort((a, b) => b.size - a.size),
   };
 }

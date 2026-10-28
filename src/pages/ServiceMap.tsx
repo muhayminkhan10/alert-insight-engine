@@ -48,14 +48,16 @@ export function ServiceMapPage() {
 
   const states = useMemo(() => {
     const map: Record<string, NodeState> = {};
-    for (const service of SERVICES) {
-      const entry = serviceHealth.get(service.id);
-      const hasActive = entry?.incidents.some((i) => i.status !== "resolved");
-      map[service.id] = hasActive ? (entry!.health === "critical" ? "root" : "affected") : "default";
+    for (const service of SERVICES) map[service.id] = "healthy";
+    for (const [id, entry] of serviceHealth) {
+      const active = entry.incidents.filter((i) => i.status !== "resolved");
+      if (!active.length) continue;
+      // Red is reserved for the engine's leading root-cause candidate.
+      map[id] = active.some((i) => i.probableRootCause === id) ? "root" : "affected";
     }
-    if (!onlyIncidents) {
+    if (onlyIncidents) {
       for (const [id, state] of Object.entries(map)) {
-        if (state === "default") map[id] = "muted";
+        if (state === "healthy") map[id] = "muted";
       }
     }
     if (selected) map[selected] = "selected";
@@ -110,7 +112,7 @@ export function ServiceMapPage() {
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
         <SectionCard
           title="Service dependency map"
-          description="Columns run upstream → downstream by tier and domain"
+          description="Columns are dependency tiers: callers on the left, infrastructure on the right. Arrows point the way calls go — failures travel against them. Click a node for details."
           actions={
             <Button
               size="sm"
@@ -118,7 +120,7 @@ export function ServiceMapPage() {
               className="h-7 text-[11px]"
               onClick={() => setOnlyIncidents((v) => !v)}
             >
-              {onlyIncidents ? "Highlighting incidents" : "Highlight incidents"}
+              {onlyIncidents ? "Show all services" : "Focus on incidents"}
             </Button>
           }
           bodyClassName="p-3 sm:p-4"
@@ -130,9 +132,9 @@ export function ServiceMapPage() {
               placeholder="Filter services…"
               className="h-8 max-w-[240px] text-xs"
             />
-            <Legend color="var(--sev-critical)" label="root-cause candidate / failing" />
+            <Legend color="var(--sev-critical)" label="root-cause candidate" />
             <Legend color="var(--sev-warning)" label="in an active incident" />
-            <Legend color="oklch(1 0 0 / 18%)" label="healthy" />
+            <Legend color="var(--sev-ok)" label="healthy" />
           </div>
 
           <DependencyGraph
@@ -252,7 +254,7 @@ export function ServiceMapPage() {
 function Legend({ color, label }: { color: string; label: string }) {
   return (
     <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-      <span className="size-2.5 border" style={{ borderColor: color }} />
+      <span className="size-2 rounded-full" style={{ background: color }} />
       {label}
     </span>
   );

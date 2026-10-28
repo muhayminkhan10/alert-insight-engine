@@ -144,6 +144,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return evaluate({
       alerts,
       groundTruth: truths,
+      config,
       proposed: result.incidents,
       proposedMs: result.durationMs,
       baselineMs,

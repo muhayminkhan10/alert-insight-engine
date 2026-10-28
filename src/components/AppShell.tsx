@@ -1,13 +1,6 @@
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { SimulatedTag } from "@/components/bits";
-import { useStore, type EnvScope } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { num } from "@/lib/format";
 import {
   Activity,
@@ -41,8 +34,6 @@ const TITLES: Record<string, string> = {
 
 export function AppShell() {
   const {
-    envScope,
-    setEnvScope,
     runAnalysisNow,
     analysis,
     dataset,
@@ -153,21 +144,6 @@ export function AppShell() {
             </div>
 
             <div className="ml-auto flex items-center gap-2 sm:gap-3">
-              <Select
-                value={envScope}
-                onValueChange={(value) => setEnvScope(value as EnvScope)}
-              >
-                <SelectTrigger className="h-8 w-[150px] gap-1.5 text-xs sm:w-[170px]">
-                  <SelectValue placeholder="Environment" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All environments</SelectItem>
-                  <SelectItem value="production">production</SelectItem>
-                  <SelectItem value="staging">staging</SelectItem>
-                  <SelectItem value="development">development</SelectItem>
-                </SelectContent>
-              </Select>
-
               <div
                 className="hidden items-center gap-2 border border-border/70 px-2.5 py-1.5 text-[11px] text-muted-foreground md:flex"
                 title={`Last run ${new Date(analysis.runAt).toLocaleTimeString()} · ${analysis.durationMs}ms`}

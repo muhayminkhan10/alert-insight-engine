@@ -309,7 +309,11 @@ export function generateDataset(seed: number): Dataset {
   // plus a couple of near-identical duplicates. Bursts per environment are
   // spaced on a grid so unrelated services never fall inside the temporal
   // gate of each other — matching how isolated background noise behaves.
+  // Cadence and volume come from the seed, so every new dataset has a
+  // different alert count, burst count and duplicate ratio. Only the five
+  // labelled scenarios stay fixed so the demo keeps its known cases.
   const slotMin = 7;
+  const targetBursts = 140;
   const available = new Map<Environment, string[]>();
   for (const env of ["production", "staging", "development"] as Environment[]) {
     const pool = SERVICES.map((s) => s.id);
@@ -321,12 +325,15 @@ export function generateDataset(seed: number): Dataset {
   }
 
   let noiseGroup = 0;
-  for (let slot = 10; slot <= 345 && noiseGroup < 180; slot += slotMin) {
+  for (let slot = 10; slot <= 345 && noiseGroup < targetBursts; slot += slotMin) {
     for (const env of ["production", "staging", "development"] as Environment[]) {
       const start = minToTs(slot);
       const end = start + 4 * 60_000;
       const clash = busy[env].some(([s, e]) => start < e && end > s);
       if (clash) continue;
+      // Seed-driven pacing: some slots stay quiet, so burst count — and with
+      // it raw volume, incident count and ground-truth size — differs per seed.
+      if (rnd() > 0.8 + rnd() * 0.2) continue;
       const service = available.get(env)!.pop();
       if (!service) continue;
       noiseGroup += 1;
@@ -349,15 +356,30 @@ export function generateDataset(seed: number): Dataset {
         description: noiseDescription(type, serviceName),
         source: SOURCES[Math.floor(rnd() * SOURCES.length)],
       };
+      const emitDup = (source: Draft) => {
+        drafts.push({
+          ...source,
+          ts: source.ts + (18 + Math.floor(rnd() * 25)) * 1000,
+          ingestDelayMs: rnd() < 0.25 ? 90_000 : undefined,
+        });
+      };
+
+      // First firing of this rule, usually with one or two duplicate deliveries.
       drafts.push(base);
-      drafts.push({
+      const baseDups = rnd() < 0.9 ? (rnd() < 0.35 ? 2 : 1) : 0;
+      for (let i = 0; i < baseDups; i++) emitDup(base);
+
+      // One repeat firing three minutes later — outside the dedup window but
+      // still well before the next slot, so bursts never merge (the gap to the
+      // next burst stays above the 3-minute temporal gate).
+      const next: Draft = {
         ...base,
-        ts: start + (38 + Math.floor(rnd() * 30)) * 1000,
-        ingestDelayMs: rnd() < 0.25 ? 90_000 : undefined,
-      });
-      const second = { ...base, ts: start + 3 * 60_000, value: +(base.value * 1.08).toFixed(2) };
-      drafts.push(second);
-      drafts.push({ ...second, ts: second.ts + 30_000 });
+        ts: base.ts + 3 * 60_000,
+        value: +(base.value * (1 + (rnd() * 0.16 - 0.05))).toFixed(2),
+      };
+      drafts.push(next);
+      const nextDups = rnd() < 0.8 ? (rnd() < 0.3 ? 2 : 1) : 0;
+      for (let i = 0; i < nextDups; i++) emitDup(next);
     }
   }
 
